@@ -1,0 +1,10 @@
+#忽略编译生成的文件
+*.o
+*.out
+/build/
+
+# TCP Server 可执行程序
+server/tcp_server
+
+# 临时文件
+*.swp
