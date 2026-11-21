@@ -19,6 +19,10 @@ Day2:接受机器人运动指令的控制服务端
 
 */
 
+
+
+
+
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -27,6 +31,10 @@ Day2:接受机器人运动指令的控制服务端
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <math.h>
+#include "robot_state.h"
+#include "command.h"
+
 
 
 int main()
@@ -35,14 +43,9 @@ int main()
     int client_fd;  //负责已经建立通信的TCP连接
     int opt=1;
 
-
-    // 机器人运行状态初始化
-    int robot_running = 0;
-
-    // 机器人运动参数初始化
-    double linear_velocity = 0;
-    double angular_velocity = 0;
-
+    //定义状态变量并初始化
+    RobotState robot_state;
+    robot_state_init(&robot_state);
 
     struct sockaddr_in server_addr; //保存服务端自己的地址信息
     struct sockaddr_in client_addr; //保存客户端的地址信息
@@ -96,9 +99,9 @@ int main()
     //通信系统打印
     printf("TCP Server listening on port 8888...\n");
     //机器人状态打印
-    printf("Robot running: %d\n", robot_running);
-    printf("Linear velocity: %.2f\n", linear_velocity);
-    printf("Angular velocity: %.2f\n", angular_velocity);
+    printf("Robot running: %d\n", robot_state.running);
+    printf("Linear velocity: %.2f\n", robot_state.linear_velocity);
+    printf("Angular velocity: %.2f\n", robot_state.angular_velocity);
    
    
    
@@ -113,132 +116,122 @@ int main()
         if(client_fd<0)
         {
             perror("accpet");
-            break;             //返回while循环等待连接
+            break;             //退出外层循环
         }
         //client_addr.sin_addr里面存储IP的二进制地址信息，需要 inet_ntop() 将它转换成可读的 IP 地址字符串，将转换结果(字符串)放在client_ip
         //TCP/IP 网络协议中，端口号使用网络字节序（大端序）保存，所以使用ntohs将网络字节序的 16 位端口号转换为主机字节序
         inet_ntop(AF_INET,&client_addr.sin_addr,client_ip,sizeof(client_ip));
         printf("client ip:%s,%d\n",client_ip,ntohs(client_addr.sin_port));
 
+        //服务器目前是一次处理一个客户端连接。每次新客户端连接时，都应该有一个新的、空的接收缓冲区
+        char   recv_buf[4096];
+        size_t recv_len=0;
 
         //接收客户端数据
         while(1)
         {
             //安全接收
             ssize_t n=recv(client_fd,buf,sizeof(buf)-1,0);    //ssize_t 是能够表达非负字节数和负错误值的有符号整数类型
-            if(n>0)
-            {
-                char response[128];
-                 buf[n] = '\0';
-                 
-                //打印客户端发送的数据
-                printf("buf capacity:%zu\n",sizeof(buf));
-                printf("received %ld bytes:",(long)n);
-                fwrite(buf, 1, n, stdout);
-                  printf("\n");
-
-                //收到STATUS
-                if(strcmp(buf,"STATUS\n")==0)
-                 {
-                     printf("STATUS command received\n");
-                     //根据机器人运行状态选择字符串
-                     //使用指针很方便，因为我们只需要根据 robot_running 选择指向哪个字符串，不需要修改字符串的字符内容。
-                     const char *state=robot_running?"RUNNING":"STOPPED";
-                     snprintf(response,sizeof(response),"%s v=%.2f w=%.2f\n",state,linear_velocity,angular_velocity);
-
-                     if(send(client_fd,response,strlen(response),0)<0)
-                     {
-                         perror("send");
-                        break;
-                     }
-                 }
-                //收到STOP
-                 else if(strcmp(buf,"STOP\n")==0)
-                 {
-                     printf("STOP command received\n");
-                    const char repy_stop[]="OK,STOP\n";
-                    robot_running = 0;
-                    linear_velocity = 0.0;
-                    angular_velocity = 0.0;
-
-                    if(send(client_fd,repy_stop,sizeof(repy_stop),0)<0)
-                    {
-                        perror("send");
-                        break;
-                    }
-                 }
-                 //收到MOVE
-                 else if(strncmp(buf,"MOVE ",5)==0)
-                 {
-                     double v,w;
-                     int ret;
-                     ret=sscanf(buf,"MOVE %lf %lf",&v,&w);
-
-                     if(ret==2)
-                     {
-                        printf("MOVE command received\n");
-                        const char repy_move[]="OK,MOVE\n";
-                        robot_running = 1;
-                        linear_velocity = v;
-                        angular_velocity = w;
-
-                         if(send(client_fd,repy_move,sizeof(repy_move),0)<0)
-                        {
-                            perror("send");
-                            break;
-                        }
-
-                     }
-
-                    else if(ret!=2)
-                    {
-                        printf("MOVE command received\n");
-                        const char repy_move[]="MOVE ERROR\n";
-
-                         if(send(client_fd,repy_move,sizeof(repy_move),0)<0)
-                        {
-                            perror("send");
-                            break;
-                        }
-
-                    }
-                 }
-
-                 //其他情况
-                 else
-                 {
-                     //直接回复 ACK
-                      const char ACK[]="ACK: message received\n";     //ACK 在这里可以理解为应用程序自定义的确认文字
-                      if(send(client_fd,ACK,sizeof(ACK)-1,0)<0)
-                      {
-                          perror("send");
-                          break;
-                      }
-                 }
-                
-            }
-
-            else if (n==0)
+            //1.判断接收结果
+            if (n==0)
             {
                  printf("Client disconnected.\n");
                  break;
             }
 
-            else
+            if(n<0)
             {
                  perror("recv");
                 break;
             }
            
-           
+            //// 2. 检查缓冲区是否有足够空间
+            if((size_t)n>sizeof(recv_buf)-recv_len)
+            {
+                printf("Receive buffer overflow\n");
+                break;
+            }
+            // 3. 累积接收到的数据并打印
+            memcpy(recv_buf+recv_len,buf,(size_t)n);//累积数据
+            recv_len +=(size_t)n;
+            printf("recv_len = %zu\n", recv_len);
+            fwrite(recv_buf, 1, recv_len, stdout);
+            printf("\n");
+
+            // 4. 循环提取完整指令
+            //识别\n结尾的完整指令并将完整指令取走，将剩余数据移动到缓冲区开头
+            //使用 memchr() 查找换行符
+            char command[1024];
+            int close_client = 0;
+
+            while(1)
+            {
+                 // 查找换行符
+                char *newline = memchr(recv_buf, '\n', recv_len);
+                 if(newline == NULL)
+                {
+                    break;
+                }
+                 size_t cmd_len = (size_t)(newline - recv_buf);//指令长度
+
+                 //检查指令长度
+                if (cmd_len >= sizeof(command))
+                {
+                    printf("Command too long\n");
+                    close_client=1;
+                    break;
+                }
+                // 提取完整指令
+                memcpy(command, recv_buf, cmd_len);
+                command[cmd_len] = '\0';
+
+                  // 兼容 Windows 客户端的 CRLF 换行
+                  //Linux：通常使用 \n 表示换行。
+                 //Windows：通常使用 \r\n 表示换行。
+                if(cmd_len > 0 && command[cmd_len - 1] == '\r')
+                {
+                     command[cmd_len - 1] = '\0';
+                }
+
+                 printf("Complete command: [%s]\n", command);
+
+                 // 移除已经提取的指令
+                size_t consumed=cmd_len+1;
+                size_t remaining=recv_len-consumed;
+                memmove(recv_buf,recv_buf+consumed,remaining);
+                recv_len=remaining;
+
+
+                // 5. 根据完整指令执行操作
+                char response[128];
+                 process_command(command, &robot_state,response,sizeof(response));
+
+                // 6. 返回处理结果
+                if(send(client_fd, response, strlen(response), 0) < 0)
+                {
+                            perror("send");
+                            close_client = 1;
+                            break;
+                }
+            }
+
+                 if(close_client)
+                {
+                     break;
+                }
+
+
+
+                // 如果尚未找到换行符，但未完成数据已经超过指令最大长度
+                 if(recv_len >= sizeof(command))
+                 {
+                    printf("Command too long\n");
+                    break;
+                }
         }
 
          close(client_fd);
     }
-
-
-
-
 
 close(server_fd);
 
