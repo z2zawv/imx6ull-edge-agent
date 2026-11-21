@@ -1,5 +1,5 @@
 /*
- TCP服务端程序：
+ Day1:TCP服务端程序：
 1.创建一个 TCP Socket。
 2.监听本机的 8888 端口。
 3.等待客户端连接。
@@ -9,6 +9,14 @@
 
 流程：创建监听Socket[socket()]--->绑定IP和端口[bind()]--->开始监听[listen()]--->等待客户端连接[accept()]--->
      接收数据并回复ACK[recv()-->send()]--->关闭客户端连接[close(client_id)]--->返回accept()，等待下一次连接
+
+Day2:接受机器人运动指令的控制服务端
+2.1建立机器人状态：
+               robot_running        int        机器人是否处于运行状态    
+               linear_velocity      double     线速度m/s
+               angular_velocity     double     加速度rad/s
+2.2设置STATUS，STOP，MOVE
+
 */
 
 #include <stdio.h>
@@ -26,6 +34,14 @@ int main()
     int server_fd;  // 负责监听新的TCP连接
     int client_fd;  //负责已经建立通信的TCP连接
     int opt=1;
+
+
+    // 机器人运行状态初始化
+    int robot_running = 0;
+
+    // 机器人运动参数初始化
+    double linear_velocity = 0;
+    double angular_velocity = 0;
 
 
     struct sockaddr_in server_addr; //保存服务端自己的地址信息
@@ -77,8 +93,12 @@ int main()
         close(server_fd);
         return EXIT_FAILURE;
     }
-
+    //通信系统打印
     printf("TCP Server listening on port 8888...\n");
+    //机器人状态打印
+    printf("Robot running: %d\n", robot_running);
+    printf("Linear velocity: %.2f\n", linear_velocity);
+    printf("Angular velocity: %.2f\n", angular_velocity);
    
    
    
@@ -86,14 +106,17 @@ int main()
     while(1)                            //无限循环，让服务器能够不断接收客户端连接
     {
         client_len=sizeof(client_addr);
-
+        //client_addr接受客户端的IP和端口号：
+        //                               client_addr.sin_addr:IP
+        //                               client_addr.sin_port:端口
         client_fd=accept(server_fd,(struct sockaddr *)&client_addr,&client_len);
         if(client_fd<0)
         {
             perror("accpet");
             break;             //返回while循环等待连接
         }
-
+        //client_addr.sin_addr里面存储IP的二进制地址信息，需要 inet_ntop() 将它转换成可读的 IP 地址字符串，将转换结果(字符串)放在client_ip
+        //TCP/IP 网络协议中，端口号使用网络字节序（大端序）保存，所以使用ntohs将网络字节序的 16 位端口号转换为主机字节序
         inet_ntop(AF_INET,&client_addr.sin_addr,client_ip,sizeof(client_ip));
         printf("client ip:%s,%d\n",client_ip,ntohs(client_addr.sin_port));
 
@@ -101,20 +124,98 @@ int main()
         //接收客户端数据
         while(1)
         {
-            ssize_t n=recv(client_fd,buf,sizeof(buf),0);    //ssize_t 是能够表达非负字节数和负错误值的有符号整数类型
+            //安全接收
+            ssize_t n=recv(client_fd,buf,sizeof(buf)-1,0);    //ssize_t 是能够表达非负字节数和负错误值的有符号整数类型
             if(n>0)
             {
+                char response[128];
+                 buf[n] = '\0';
+                 
+                //打印客户端发送的数据
                 printf("buf capacity:%zu\n",sizeof(buf));
                 printf("received %ld bytes:",(long)n);
                 fwrite(buf, 1, n, stdout);
                   printf("\n");
 
-                const char ACK[]="ACK: message received\n";     //ACK 在这里可以理解为应用程序自定义的确认文字
-                if(send(client_fd,ACK,sizeof(ACK)-1,0)<0)
-                {
-                    perror("send");
-                    break;
-                }
+                //收到STATUS
+                if(strcmp(buf,"STATUS\n")==0)
+                 {
+                     printf("STATUS command received\n");
+                     //根据机器人运行状态选择字符串
+                     //使用指针很方便，因为我们只需要根据 robot_running 选择指向哪个字符串，不需要修改字符串的字符内容。
+                     const char *state=robot_running?"RUNNING":"STOPPED";
+                     snprintf(response,sizeof(response),"%s v=%.2f w=%.2f\n",state,linear_velocity,angular_velocity);
+
+                     if(send(client_fd,response,strlen(response),0)<0)
+                     {
+                         perror("send");
+                        break;
+                     }
+                 }
+                //收到STOP
+                 else if(strcmp(buf,"STOP\n")==0)
+                 {
+                     printf("STOP command received\n");
+                    const char repy_stop[]="OK,STOP\n";
+                    robot_running = 0;
+                    linear_velocity = 0.0;
+                    angular_velocity = 0.0;
+
+                    if(send(client_fd,repy_stop,sizeof(repy_stop),0)<0)
+                    {
+                        perror("send");
+                        break;
+                    }
+                 }
+                 //收到MOVE
+                 else if(strncmp(buf,"MOVE ",5)==0)
+                 {
+                     double v,w;
+                     int ret;
+                     ret=sscanf(buf,"MOVE %lf %lf",&v,&w);
+
+                     if(ret==2)
+                     {
+                        printf("MOVE command received\n");
+                        const char repy_move[]="OK,MOVE\n";
+                        robot_running = 1;
+                        linear_velocity = v;
+                        angular_velocity = w;
+
+                         if(send(client_fd,repy_move,sizeof(repy_move),0)<0)
+                        {
+                            perror("send");
+                            break;
+                        }
+
+                     }
+
+                    else if(ret!=2)
+                    {
+                        printf("MOVE command received\n");
+                        const char repy_move[]="MOVE ERROR\n";
+
+                         if(send(client_fd,repy_move,sizeof(repy_move),0)<0)
+                        {
+                            perror("send");
+                            break;
+                        }
+
+                    }
+                 }
+
+                 //其他情况
+                 else
+                 {
+                     //直接回复 ACK
+                      const char ACK[]="ACK: message received\n";     //ACK 在这里可以理解为应用程序自定义的确认文字
+                      if(send(client_fd,ACK,sizeof(ACK)-1,0)<0)
+                      {
+                          perror("send");
+                          break;
+                      }
+                 }
+                
             }
 
             else if (n==0)
